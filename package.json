@@ -1,11 +1,13 @@
 {
-  "name": "@niur/nestjs-service-bus",
-  "version": "1.0.0",
+  "name": "@itacs/nestjs-service-bus",
+  "version": "1.0.2",
   "description": "NestJS Azure Service Bus Microservice Transport",
   "main": "dist/index",
   "types": "dist/index",
   "scripts": {
     "build": "rimraf dist && tsc",
+    "build:publish": "npm run build && npm pack && npm publish",
+    "start:dev": "rimraf dist && tsc --watch",
     "prepublish": "npm run build",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -23,14 +25,17 @@
     "@nestjs/common": "^9.1.6",
     "@nestjs/core": "^9.1.6",
     "@nestjs/microservices": "^9.1.6",
+    "@nestjs/terminus": "^9.1.2",
     "reflect-metadata": "^0.1.13",
     "rxjs": "^7.5.7"
   },
   "devDependencies": {
+    "@azure/core-http": "^2.3.1",
     "@azure/service-bus": "^7.7.2",
     "@nestjs/common": "^9.1.6",
     "@nestjs/core": "^9.1.6",
     "@nestjs/microservices": "^9.1.6",
+    "@nestjs/terminus": "^9.1.2",
     "@types/node": "^18.11.9",
     "reflect-metadata": "^0.1.13",
     "rimraf": "^3.0.2",

@@ -5,6 +5,7 @@ import {
 
 export interface AzureServiceBusOptions {
   connectionString: string;
+  groupId: string;
   options?: ServiceBusClientOptions;
 }
 
