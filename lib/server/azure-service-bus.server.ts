@@ -142,7 +142,7 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 						lockDuration: 'PT1M',
 						autoDeleteOnIdle: 'P14D',
 						duplicateDetectionHistoryTimeWindow: 'PT10M',
-						enablePartitioning: true
+						enablePartitioning: false
 					});
 					this.log.log(`queue '${name}' created`);
 				} else {
@@ -168,7 +168,7 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 				t = await this.sbAdminClient.createTopic(name, {
 					duplicateDetectionHistoryTimeWindow: 'PT10M',
 					requiresDuplicateDetection: true,
-					enablePartitioning: true
+					enablePartitioning: false
 				});
 				this.log.log(`topic '${name}' created`);
 			} else {
