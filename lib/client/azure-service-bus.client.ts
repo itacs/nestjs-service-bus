@@ -5,6 +5,7 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { AzureServiceBusClientProxy } from '.';
 import { AzureServiceBusOptions, AzureServiceBusSenderOptions } from '../interfaces';
+import { getSubscriptionName, splitPattern } from '../utils';
 
 @Injectable()
 export class AzureServiceBusClient extends AzureServiceBusClientProxy {
@@ -27,21 +28,26 @@ export class AzureServiceBusClient extends AzureServiceBusClientProxy {
 	}
 
 	protected async dispatchEvent(partialPacket: ReadPacket<{ pattern: { name: string; options: AzureServiceBusSenderOptions }; data: any }>): Promise<any> {
-    const packet = this.assignPacketId(partialPacket);
+		const packet = this.assignPacketId(partialPacket);
 		const pattern = this.normalizePattern(packet.pattern);
 		const { name, options } = JSON.parse(pattern) as AzureServiceBusSenderOptions;
+		const { topic, method } = splitPattern(name);
 		const serializedPacket = this.serializer.serialize(packet.data);
 
-    let messages = [
-      {
-        messageId: packet.id,
-        ...serializedPacket,
-      }
-    ];
+		let messages: ServiceBusMessage[] = [
+			{
+				messageId: packet.id,
+				...serializedPacket,
+				applicationProperties: {
+					'x-method': method,
+					'x-direction': 'request'
+				}
+			}
+		];
 
-		const sender = this.sbClient.createSender(name);
+		const sender = this.sbClient.createSender(topic);
 
-    this.log.verbose(`emitting events id:${packet.id} to:${sender.entityPath}`);
+		this.log.verbose(`emitting events id:${packet.id} to:${sender.entityPath}`);
 
 		await sender.sendMessages(messages, options);
 		await sender.close();
@@ -52,16 +58,29 @@ export class AzureServiceBusClient extends AzureServiceBusClientProxy {
 			const packet = this.assignPacketId(partialPacket);
 			const pattern = this.normalizePattern(packet.pattern);
 			const { name, options } = JSON.parse(pattern) as AzureServiceBusSenderOptions;
+			const { topic, method } = splitPattern(name);
 			const serializedPacket = this.serializer.serialize(packet.data);
-			const replyTo = this.getReplyTo(name);
-			const sender = this.sbClient.createSender(name);
-			const receiver = this.sbClient.createReceiver(replyTo, { receiveMode: 'peekLock' });
+			const sender = this.sbClient.createSender(topic);
+			const replyTo = name + '.reply';
+			let receiver: ServiceBusReceiver;
+			if (method) {
+				// use topic and subscriber for reply if method is set
+				const subscriptionName = getSubscriptionName('', method, 'reply');
+				receiver = this.sbClient.createReceiver(topic, subscriptionName, { receiveMode: 'peekLock' });
+			} else {
+				// use queue for reply if method is not set			
+				receiver = this.sbClient.createReceiver(replyTo, { receiveMode: 'peekLock' });
+			}
 
 			let messages = [
 				{
 					messageId: packet.id,
 					...serializedPacket,
-					replyTo
+					replyTo,
+					applicationProperties: {
+						'x-method': method,
+						'x-direction': 'request'
+					}
 				}
 			];
 
@@ -125,10 +144,6 @@ export class AzureServiceBusClient extends AzureServiceBusClientProxy {
 			response: body
 		});
 	}
-
-	public getReplyTo = (pattern: string): string => {
-		return `${pattern}.reply`;
-	};
 
 	createServiceBusClient(): ServiceBusClient {
 		const { connectionString, options } = this.options;

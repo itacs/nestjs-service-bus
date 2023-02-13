@@ -212,6 +212,11 @@
   resolved "https://registry.yarnpkg.com/@tootallnate/once/-/once-2.0.0.tgz#f544a148d3ab35801c1f633a7441fd87c2e484bf"
   integrity sha512-XCuKFP5PS55gnMVu3dty8KPatLqUoy/ZYzDzAGCQ8JNFCkLXzmI7vNHCR+XpbZaMWQK/vQubr7PkYq8g470J/A==
 
+"@types/async-lock@^1.4.0":
+  version "1.4.0"
+  resolved "https://pkgs.dev.azure.com/gasag/18ded61e-4b53-4268-972c-a80afb545c11/_packaging/lap-npm/npm/registry/@types/async-lock/-/async-lock-1.4.0.tgz#e7d555d037f93e911d54000acb626e783ff9023a"
+  integrity sha1-59VV0Df5PpEdVAAKy2JueD/5Ajo=
+
 "@types/is-buffer@^2.0.0":
   version "2.0.0"
   resolved "https://registry.yarnpkg.com/@types/is-buffer/-/is-buffer-2.0.0.tgz#94de4d23540646de5f5df2cd346a1c162067ea5a"
@@ -264,6 +269,11 @@ ansi-styles@^4.0.0, ansi-styles@^4.1.0:
   integrity sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg==
   dependencies:
     color-convert "^2.0.1"
+
+async-lock@^1.4.0:
+  version "1.4.0"
+  resolved "https://pkgs.dev.azure.com/gasag/18ded61e-4b53-4268-972c-a80afb545c11/_packaging/lap-npm/npm/registry/async-lock/-/async-lock-1.4.0.tgz#c8b6630eff68fbbdd8a5b6eb763dac3bfbb8bf02"
+  integrity sha1-yLZjDv9o+73Ypbbrdj2sO/u4vwI=
 
 asynckit@^0.4.0:
   version "0.4.0"

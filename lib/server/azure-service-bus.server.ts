@@ -12,15 +12,18 @@ import {
 	QueueProperties,
 	isServiceBusError,
 	delay,
-	ServiceBusReceiver
+	ServiceBusReceiver,
+	RuleProperties
 } from '@azure/service-bus';
 
 import { RestError } from '@azure/core-http';
+import AsyncLock from 'async-lock';
 
 import { AzureServiceBusContext } from '../azure-service-bus.context';
 import { AzureServiceBusOptions } from '../interfaces';
 import { SbSubscriberMetadata } from '../metadata';
 import { Logger } from '@nestjs/common';
+import { getSubscriptionName, splitPattern } from '../utils';
 
 interface ISubscription {
 	close(): Promise<void>;
@@ -50,6 +53,7 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 	private createdReceivers: Array<ServiceBusReceiver> = [];
 	private createdSubscriptions: Array<SubscriptionWrapper> = [];
 	static #instance: AzureServiceBusServer;
+	private lock: AsyncLock;
 	public static get instance() {
 		return AzureServiceBusServer.#instance;
 	}
@@ -58,6 +62,7 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 		super();
 		this.initializeSerializer(options);
 		this.initializeDeserializer(options);
+		this.lock = new AsyncLock();
 		AzureServiceBusServer.#instance = this;
 	}
 
@@ -78,6 +83,7 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 
 	async bindEvents(): Promise<void> {
 		const subscribe = async (pattern: string) => {
+			let subscriptionFilterMethod: string;
 			let opt: SbSubscriberMetadata;
 			try {
 				opt = JSON.parse(pattern);
@@ -86,10 +92,13 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 				if (pattern.includes('{') && pattern.includes('}')) {
 					throw ex;
 				}
+				const splittedPattern = splitPattern(pattern);
+				subscriptionFilterMethod = splittedPattern.method;
+
 				// pattern is just a simple string, now used as topic
 				opt = {
 					metaOptions: {
-						topic: pattern,
+						topic: splittedPattern.topic,
 						subscription: this.options.groupId,
 						receiveMode: 'peekLock'
 					},
@@ -101,10 +110,17 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 				metaOptions: { topic, subscription, subQueueType, skipParsingBodyAsJson, receiveMode, options }
 			} = opt;
 
-			await this.ensureTopic(topic);
-			await this.ensureSubscription(topic, subscription);
+			await this.lock.acquire(['create', topic], async () => {
+				await this.ensureTopic(topic);
+			});
 
-			const receiver = this.sbClient.createReceiver(topic, subscription, {
+			const finalName = await this.lock.acquire(['create', topic, subscription, subscriptionFilterMethod], async () => {
+				// create reply channel
+				await this.ensureSubscription(topic, '', subscriptionFilterMethod, 'reply');
+				return await this.ensureSubscription(topic, subscription, subscriptionFilterMethod, 'request');
+			});
+
+			const receiver = this.sbClient.createReceiver(topic, finalName, {
 				receiveMode,
 				subQueueType,
 				skipParsingBodyAsJson
@@ -165,6 +181,7 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 		} catch (ex) {
 			const restError = ex as RestError;
 			if (restError.code == 'MessageEntityNotFoundError') {
+				this.log.log(`topic '${name}' creating`);
 				t = await this.sbAdminClient.createTopic(name, {
 					duplicateDetectionHistoryTimeWindow: 'PT10M',
 					requiresDuplicateDetection: true,
@@ -182,14 +199,18 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 	 * @param topicName
 	 * @param subscriptionName
 	 */
-	private async ensureSubscription(topicName: string, subscriptionName: string): Promise<void> {
+	private async ensureSubscription(topicName: string, svcName: string, filterMethod: string | undefined, direction?: 'request' | 'reply'): Promise<string> {
+		// check if svcName or filterMethod is set
+		if (!svcName && !filterMethod) return '';
 		let s: WithResponse<SubscriptionProperties>;
+		const subscriptionName = getSubscriptionName(svcName, filterMethod, direction);
 		try {
 			s = await this.sbAdminClient.getSubscription(topicName, subscriptionName);
 			this.log.log(`subscription '${topicName}' < '${subscriptionName}' found`);
 		} catch (ex) {
 			const restError = ex as RestError;
 			if (restError.code == 'MessageEntityNotFoundError') {
+				this.log.log(`subscription '${topicName}' < '${subscriptionName}' creating`);
 				s = await this.sbAdminClient.createSubscription(topicName, subscriptionName, {
 					maxDeliveryCount: 50,
 					autoDeleteOnIdle: 'P14D',
@@ -202,6 +223,34 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 			} else {
 				throw ex;
 			}
+		}
+		if (filterMethod) {
+			await this.createSubscriptionRule(topicName, svcName, filterMethod, direction);
+		}
+		return subscriptionName;
+	}
+
+	private async createSubscriptionRule(topicName: string, svcName: string, filterMethod: string, direction: 'request' | 'reply') {
+		let r: RuleProperties;
+		const subscriptionName = getSubscriptionName(svcName, filterMethod, direction);
+		try {
+			r = await this.sbAdminClient.getRule(topicName, subscriptionName, 'ByMethod');
+			this.log.log(`rule '${topicName}' < '${subscriptionName}'.ByMethod found`);
+		} catch (ex) {
+			const restError = ex as RestError;
+			if (restError.code == 'MessageEntityNotFoundError') {
+				this.log.log(`rule '${topicName}' < '${subscriptionName}'.ByMethod creating`);
+				r = await this.sbAdminClient.createRule(topicName, subscriptionName, 'ByMethod', {
+					applicationProperties: { 'x-method': filterMethod, 'x-direction': direction }
+				});
+				this.log.log(`rule '${topicName}' < '${subscriptionName}'.ByMethod created`);
+			} else {
+				throw ex;
+			}
+			try {
+				// delete default Rule
+				await this.sbAdminClient.deleteRule(topicName, subscriptionName, '$Default');
+			} catch (ex) {}
 		}
 	}
 
@@ -243,22 +292,33 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 			// handle emit of event
 			return this.handleEvent(packet.pattern, { pattern: packet.pattern, data: packet.data.body }, sbContext);
 		}
-
 		// handle send of message
-		const publish = this.getPublisher(receivedMessage.replyTo, receivedMessage.messageId as string);
+		const { topic, method } = splitPattern(packet.pattern);
+		const publish = this.getPublisher({ topic, method, replyTo: receivedMessage.replyTo!, correlationId: receivedMessage.messageId as string });
 		const handler = this.getHandlerByPattern(pattern);
 		const response$ = this.transformToObservable(await handler(receivedMessage.body, sbContext));
 		response$ && this.send(response$, publish);
 	}
 
-	public getPublisher(replyTo: string, correlationId: string) {
+	public getPublisher(request: IPublisherRequest) {
 		return async (data: WritePacket) => {
-			await this.ensureQueue(replyTo);
-			const sender = this.sbClient.createSender(replyTo);
-			this.log.verbose(`sending reply to collectionId: ${correlationId}`);
+			let topicOrQueue: string;
+			// send to queue if no method was found, otherwise use topic
+			if (!request.method) {
+				topicOrQueue = request.replyTo;
+				await this.ensureQueue(topicOrQueue);
+			} else {
+				topicOrQueue = request.topic;
+			}
+			const sender = this.sbClient.createSender(topicOrQueue);
+			this.log.verbose(`sending reply to collectionId: ${request.correlationId}`);
 			const responseMessage = {
-				correlationId,
-				body: data.response
+				correlationId: request.correlationId,
+				body: data.response,
+				applicationProperties: {
+					'x-method': request.method,
+					'x-direction': 'reply'
+				}
 			} as ServiceBusMessage;
 			await sender.sendMessages([responseMessage]);
 			await sender.close();
@@ -287,4 +347,11 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 		this.sbAdminClient = undefined;
 		await this.sbClient?.close();
 	}
+}
+
+interface IPublisherRequest {
+	topic: string;
+	method?: string;
+	replyTo: string;
+	correlationId: string;
 }
