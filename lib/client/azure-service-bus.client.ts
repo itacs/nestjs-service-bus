@@ -9,7 +9,7 @@ import { getSubscriptionName, splitPattern } from '../utils';
 
 @Injectable()
 export class AzureServiceBusClient extends AzureServiceBusClientProxy {
-	private sbClient: ServiceBusClient;
+	private sbClient: ServiceBusClient | undefined;
 	private log = new Logger(AzureServiceBusClient.name);
 
 	constructor(protected readonly options: AzureServiceBusOptions) {
@@ -28,6 +28,9 @@ export class AzureServiceBusClient extends AzureServiceBusClientProxy {
 	}
 
 	protected async dispatchEvent(partialPacket: ReadPacket<{ pattern: { name: string; options: AzureServiceBusSenderOptions }; data: any }>): Promise<any> {
+		if (!this.sbClient) {
+			throw Error('ServiceBus Client not created!');
+		}
 		const packet = this.assignPacketId(partialPacket);
 		const pattern = this.normalizePattern(packet.pattern);
 		const { name, options } = JSON.parse(pattern) as AzureServiceBusSenderOptions;
@@ -55,6 +58,9 @@ export class AzureServiceBusClient extends AzureServiceBusClientProxy {
 
 	protected publish(partialPacket: ReadPacket<any>, callback: (packet: WritePacket<any>) => void): () => void {
 		try {
+			if (!this.sbClient) {
+				throw Error('ServiceBus Client not created!');
+			}
 			const packet = this.assignPacketId(partialPacket);
 			const pattern = this.normalizePattern(packet.pattern);
 			const { name, options } = JSON.parse(pattern) as AzureServiceBusSenderOptions;
@@ -68,7 +74,7 @@ export class AzureServiceBusClient extends AzureServiceBusClientProxy {
 				const subscriptionName = getSubscriptionName('', method, 'reply');
 				receiver = this.sbClient.createReceiver(topic, subscriptionName, { receiveMode: 'peekLock' });
 			} else {
-				// use queue for reply if method is not set			
+				// use queue for reply if method is not set
 				receiver = this.sbClient.createReceiver(replyTo, { receiveMode: 'peekLock' });
 			}
 
@@ -101,6 +107,7 @@ export class AzureServiceBusClient extends AzureServiceBusClientProxy {
 			};
 		} catch (err) {
 			callback({ err });
+			return () => {};
 		}
 	}
 

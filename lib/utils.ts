@@ -16,10 +16,21 @@ export function splitPattern(pattern: string) {
 		method: undefined
 	};
 }
+
 export function getSubscriptionName(svcName: string, method: string | undefined, direction?: 'request' | 'reply') {
-	const name = ((method || '') + '_' + (svcName||'')).replace(/(^_|_$)/, '');
+	const name = ((method || '') + '_' + (svcName || '')).replace(/(^_|_$)/, '');
 	if (direction === 'reply') {
 		return name + '.reply';
 	}
 	return name;
+}
+
+export function arrayUnique<T>(array: T[]) {
+	var a = array.concat();
+	for (var i = 0; i < a.length; ++i) {
+		for (var j = i + 1; j < a.length; ++j) {
+			if (a[i] === a[j]) a.splice(j--, 1);
+		}
+	}
+	return a;
 }
