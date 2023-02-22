@@ -1,15 +1,13 @@
-import { Server, WritePacket, CustomTransportStrategy, ReadPacket } from '@nestjs/microservices';
+import { Server, CustomTransportStrategy, ReadPacket } from '@nestjs/microservices';
 import {
 	MessageHandlers,
 	ProcessErrorArgs,
 	ServiceBusAdministrationClient,
 	ServiceBusClient,
-	ServiceBusMessage,
 	ServiceBusReceivedMessage,
 	TopicProperties,
 	WithResponse,
 	SubscriptionProperties,
-	QueueProperties,
 	isServiceBusError,
 	delay,
 	ServiceBusReceiver,
@@ -21,16 +19,8 @@ import AsyncLock from 'async-lock';
 
 import { AzureServiceBusContext } from '../azure-service-bus.context';
 import { AzureServiceBusOptions } from '../interfaces';
-import { SbSubscriberMetadata } from '../metadata';
+// import { SbSubscriberMetadata } from '../metadata';
 import { Logger } from '@nestjs/common';
-import { getSubscriptionName, splitPattern } from '../utils';
-
-interface IPublisherRequest {
-	topic: string;
-	method?: string;
-	replyTo: string;
-	correlationId: string;
-}
 
 interface ISubscription {
 	close(): Promise<void>;
@@ -57,9 +47,8 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 	private sbClient: ServiceBusClient | undefined;
 	private sbAdminClient: ServiceBusAdministrationClient | undefined;
 	private log = new Logger(AzureServiceBusServer.name);
-	private knownQueues: Array<string> = [];
-	private createdReceivers: Array<ServiceBusReceiver> = [];
-	private createdSubscriptions: Array<SubscriptionWrapper> = [];
+	private createdReceiver: ServiceBusReceiver | undefined;
+	private createdSubscription: SubscriptionWrapper | undefined;
 	static #instance: AzureServiceBusServer;
 	private lock: AsyncLock;
 	public static get instance() {
@@ -90,103 +79,45 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 	}
 
 	async bindEvents(): Promise<void> {
-		const subscribe = async (pattern: string) => {
-			let subscriptionFilterMethod: string | undefined;
-			let opt: SbSubscriberMetadata;
-			if (!this.sbClient) {
-				throw Error('ServiceBus Client not created!');
-			}
-			try {
-				opt = JSON.parse(pattern);
-			} catch (ex) {
-				// check if pattern might be a json after all
-				if (pattern.includes('{') && pattern.includes('}')) {
-					throw ex;
-				}
+		if (!this.sbClient) {
+			throw Error('ServiceBus Client not created!');
+		}
 
-				// pattern is just a simple string, now used as topic and possibly method, when separated by dot
-				const splittedPattern = splitPattern(pattern);
-				subscriptionFilterMethod = splittedPattern.method;
+		if (this.createdReceiver || this.createdSubscription) {
+			throw Error('Receiver or Subscription already created!');
+		}
 
-				opt = {
-					metaOptions: {
-						topic: splittedPattern.topic,
-						subscription: this.options.groupId,
-						receiveMode: 'peekLock'
-					},
-					type: 'subscription'
-				};
-			}
+		const topic = this.options.topic;
+		const subscription = this.options.groupId;
 
-			const {
-				metaOptions: { topic, subscription, subQueueType, skipParsingBodyAsJson, receiveMode, options }
-			} = opt;
+		await this.lock.acquire(['create', topic], async () => {
+			await this.ensureTopic(topic);
+		});
 
-			await this.lock.acquire(['create', topic], async () => {
-				await this.ensureTopic(topic);
-			});
+		//try to avoid conflict error in race condition
+		await this.lock.acquire(['create', topic, subscription], async () => {
+			// create request channel
+			return await this.ensureSubscription(topic, subscription);
+		});
 
-			//try to avoid conflict error in race condition
-			const finalName = await this.lock.acquire(['create', topic, subscription, subscriptionFilterMethod ?? ''], async () => {
-				// create reply channel
-				await this.ensureSubscription(topic, '', subscriptionFilterMethod, 'reply');
+		const prepare = async (pattern: string) => {
+			await this.lock.acquire(['create', topic, subscription, pattern], async () => {
 				// create request channel
-				return await this.ensureSubscription(topic, subscription, subscriptionFilterMethod, 'request');
+				return await this.ensureSubscriptionRule(topic, subscription, pattern);
 			});
-
-			const receiver = this.sbClient.createReceiver(topic, finalName, {
-				receiveMode,
-				subQueueType,
-				skipParsingBodyAsJson
-			});
-
-			const subscriptionWrapper = new SubscriptionWrapper();
-			this.createdSubscriptions.push(subscriptionWrapper);
-			subscriptionWrapper.subscription = receiver.subscribe(this.createMessageHandlers(pattern, subscriptionWrapper), options);
-			this.log.log(`receiver for ${topic} started`);
-			this.createdReceivers.push(receiver);
 		};
 
-		const registeredPatterns = [...this.messageHandlers.keys()];
+		const registeredPatterns = [
+			...Array.from(this.messageHandlers.keys()).filter((p) => {
+				return this.messageHandlers.get(p)?.isEventHandler;
+			})
+		];
+		await Promise.all(registeredPatterns.map(prepare));
 
-		await Promise.all(registeredPatterns.map(subscribe));
-	}
-
-	/**
-	 * Ensures that a queue is available in service bus
-	 * @param name
-	 */
-	private async ensureQueue(name: string): Promise<void> {
-		if (!this.knownQueues.includes(name)) {
-			let q: WithResponse<QueueProperties>;
-			if (!this.sbAdminClient) {
-				throw Error('ServiceBus Admin not created!');
-			}
-			try {
-				q = await this.sbAdminClient.getQueue(name);
-				this.log.log(`queue '${name}' found`);
-			} catch (ex) {
-				const restError = ex as RestError;
-				if (restError.code == 'MessageEntityNotFoundError') {
-					q = await this.sbAdminClient.createQueue(name, {
-						...{
-							maxSizeInMegabytes: 1024,
-							maxDeliveryCount: 10,
-							defaultMessageTimeToLive: 'P14D',
-							lockDuration: 'PT1M',
-							autoDeleteOnIdle: 'P14D',
-							duplicateDetectionHistoryTimeWindow: 'PT10M',
-							enablePartitioning: false
-						},
-						...(this.options.createQueueOptions ?? {})
-					});
-					this.log.log(`queue '${name}' created`);
-				} else {
-					throw ex;
-				}
-			}
-			this.knownQueues.push(name);
-		}
+		this.createdReceiver = this.sbClient.createReceiver(topic, subscription, this.options.receiverOptions);
+		this.createdSubscription = new SubscriptionWrapper();
+		this.createdSubscription.subscription = this.createdReceiver.subscribe(this.createMessageHandlers(this.createdSubscription), this.options.subscribeOptions);
+		this.log.log(`receiver for ${topic}.${subscription} started`);
 	}
 
 	/**
@@ -225,14 +156,14 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 	 * @param topicName
 	 * @param subscriptionName
 	 */
-	private async ensureSubscription(topicName: string, svcName: string, filterMethod: string | undefined, direction?: 'request' | 'reply'): Promise<string> {
-		// check if svcName or filterMethod is set
-		if (!svcName && !filterMethod) return '';
+	private async ensureSubscription(topicName: string, subscriptionName: string): Promise<void> {
+		// check if svcName is set
+		if (!topicName || !subscriptionName) throw Error('topicName and subscriptionName must be set!');
 		let s: WithResponse<SubscriptionProperties>;
 		if (!this.sbAdminClient) {
 			throw Error('ServiceBus Admin not created!');
 		}
-		const subscriptionName = getSubscriptionName(svcName, filterMethod, direction);
+
 		try {
 			s = await this.sbAdminClient.getSubscription(topicName, subscriptionName);
 			this.log.log(`subscription '${topicName}' < '${subscriptionName}' found`);
@@ -256,29 +187,26 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 				throw ex;
 			}
 		}
-		if (filterMethod) {
-			await this.createSubscriptionRule(topicName, svcName, filterMethod, direction);
-		}
-		return subscriptionName;
 	}
 
-	private async createSubscriptionRule(topicName: string, svcName: string, filterMethod: string, direction: 'request' | 'reply' | undefined) {
+	private async ensureSubscriptionRule(topicName: string, subscriptionName: string, filterMethod: string) {
 		let r: RuleProperties;
 		if (!this.sbAdminClient) {
 			throw Error('ServiceBus Admin not created!');
 		}
-		const subscriptionName = getSubscriptionName(svcName, filterMethod, direction);
+		//clean up filterMethod for rule name
+		const ruleName = filterMethod.replace(/[^A-Za-z0-9\w-\.\/\~]/g, '-').replace(/^\-+|\-+$/, '');
 		try {
-			r = await this.sbAdminClient.getRule(topicName, subscriptionName, 'ByMethod');
-			this.log.log(`rule '${topicName}' < '${subscriptionName}'.ByMethod found`);
+			r = await this.sbAdminClient.getRule(topicName, subscriptionName, ruleName);
+			this.log.log(`rule '${topicName}' < '${subscriptionName}'.'${ruleName}' found`);
 		} catch (ex) {
 			const restError = ex as RestError;
 			if (restError.code == 'MessageEntityNotFoundError') {
-				this.log.log(`rule '${topicName}' < '${subscriptionName}'.ByMethod creating`);
-				r = await this.sbAdminClient.createRule(topicName, subscriptionName, 'ByMethod', {
-					applicationProperties: { 'x-method': filterMethod, 'x-direction': direction ?? 'request' }
+				this.log.log(`rule '${topicName}' < '${subscriptionName}'..'${ruleName}' creating`);
+				r = await this.sbAdminClient.createRule(topicName, subscriptionName, ruleName, {
+					applicationProperties: { 'x-method': filterMethod }
 				});
-				this.log.log(`rule '${topicName}' < '${subscriptionName}'.ByMethod created`);
+				this.log.log(`rule '${topicName}' < '${subscriptionName}'..'${ruleName}' created`);
 			} else {
 				throw ex;
 			}
@@ -289,8 +217,8 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 		}
 	}
 
-	public createMessageHandlers = (pattern: string, subscriptionWrapper: SubscriptionWrapper): MessageHandlers => ({
-		processMessage: async (receivedMessage: ServiceBusReceivedMessage) => await this.handleMessage(receivedMessage, pattern),
+	public createMessageHandlers = (subscriptionWrapper: SubscriptionWrapper): MessageHandlers => ({
+		processMessage: async (receivedMessage: ServiceBusReceivedMessage) => await this.handleMessage(receivedMessage),
 		processError: async (args: ProcessErrorArgs): Promise<void> => {
 			this.log.error(`Error from source ${args.errorSource} occurred: `, args.error);
 			// the `subscribe() call will not stop trying to receive messages without explicit intervention from you.
@@ -318,53 +246,13 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 		}
 	});
 
-	public async handleMessage(receivedMessage: ServiceBusReceivedMessage, pattern: string): Promise<void> {
-		const partialPacket = { data: receivedMessage, pattern };
-		const packet = (await this.deserializer.deserialize(partialPacket)) as ReadPacket<ServiceBusMessage>;
+	public async handleMessage(receivedMessage: ServiceBusReceivedMessage): Promise<void> {
+		const pattern = receivedMessage.applicationProperties?.['x-method'];
+		const partialPacket = { data: receivedMessage.body, pattern };
+		const packet = (await this.deserializer.deserialize(partialPacket)) as ReadPacket<any>;
 
-		const sbContext = new AzureServiceBusContext([packet.pattern, packet.data]);
-		if (!receivedMessage.replyTo) {
-			// handle emit of event
-			return this.handleEvent(packet.pattern, { pattern: packet.pattern, data: packet.data.body }, sbContext);
-		}
-		// handle send of message
-		const { topic, method } = splitPattern(packet.pattern);
-		const publish = this.getPublisher({ topic, method, replyTo: receivedMessage.replyTo!, correlationId: receivedMessage.messageId as string });
-		const handler = this.getHandlerByPattern(pattern);
-		if (handler) {
-			const response$ = this.transformToObservable(await handler(receivedMessage.body, sbContext));
-			response$ && this.send(response$, publish);
-		} else {
-			throw Error(`Handle can not be found by Pattern '${pattern}'!`);
-		}
-	}
-
-	public getPublisher(request: IPublisherRequest) {
-		return async (data: WritePacket) => {
-			let topicOrQueue: string;
-			if (!this.sbClient) {
-				throw Error('ServiceBus Client not created!');
-			}
-			// send to queue if no method was found, otherwise use topic
-			if (!request.method) {
-				topicOrQueue = request.replyTo;
-				await this.ensureQueue(topicOrQueue);
-			} else {
-				topicOrQueue = request.topic;
-			}
-			const sender = this.sbClient.createSender(topicOrQueue);
-			this.log.verbose(`sending reply to collectionId: ${request.correlationId}`);
-			const responseMessage = {
-				correlationId: request.correlationId,
-				body: data.response,
-				applicationProperties: {
-					'x-method': request.method,
-					'x-direction': 'reply'
-				}
-			} as ServiceBusMessage;
-			await sender.sendMessages([responseMessage]);
-			await sender.close();
-		};
+		const sbContext = new AzureServiceBusContext([packet.pattern, packet.data, receivedMessage]);
+		return this.handleEvent(packet.pattern, packet, sbContext);
 	}
 
 	createServiceBusClient(): ServiceBusClient {
@@ -378,14 +266,14 @@ export class AzureServiceBusServer extends Server implements CustomTransportStra
 	}
 
 	public hasClosedConnections(): boolean {
-		return !!(this.createdSubscriptions.find((s) => s.isClosed) || this.createdReceivers.find((r) => r.isClosed));
+		return !!((this.createdSubscription?.isClosed ?? true) || (this.createdReceiver?.isClosed ?? true));
 	}
 
 	async close(): Promise<void> {
-		await Promise.all(this.createdSubscriptions.map((r) => r.close()));
-		await Promise.all(this.createdReceivers.map((r) => r.close()));
-		this.createdReceivers.length = 0;
-		this.knownQueues.length = 0;
+		await this.createdSubscription?.close();
+		this.createdSubscription = undefined;
+		await this.createdReceiver?.close();
+		this.createdReceiver = undefined;
 		this.sbAdminClient = undefined;
 		await this.sbClient?.close();
 	}

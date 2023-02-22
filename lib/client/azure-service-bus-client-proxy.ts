@@ -1,30 +1,23 @@
 import { isNil } from '@nestjs/common/utils/shared.utils';
-import { ClientProxy } from '@nestjs/microservices';
-import { connectable, defer, mergeMap, Observable, Observer, Subject, throwError } from 'rxjs';
+import { ClientProxy, ReadPacket, WritePacket } from '@nestjs/microservices';
+import { connectable, defer, mergeMap, Observable, Subject, throwError } from 'rxjs';
 
 import { AzureServiceBusSenderOptions } from '../interfaces';
 import { InvalidMessageException } from '../errors';
 import { ServiceBusMessage, ServiceBusMessageBatch } from '@azure/service-bus';
 import { AmqpAnnotatedMessage } from '@azure/core-amqp';
+import { NotImplementedException } from '@nestjs/common';
 
 export abstract class AzureServiceBusClientProxy extends ClientProxy {
 	public send<
 		TResult = AzureServiceBusSenderOptions,
 		TInput = ServiceBusMessage | ServiceBusMessage[] | ServiceBusMessageBatch | AmqpAnnotatedMessage | AmqpAnnotatedMessage[]
 	>(pattern: AzureServiceBusSenderOptions, data: TInput): Observable<TResult> {
-		if (isNil(pattern) || isNil(data)) {
-			return throwError(() => new InvalidMessageException());
-		}
+		return throwError(() => new NotImplementedException("ServiceBus Transporter does not support replies!"));
+	}
 
-		return defer(async () => this.connect()).pipe(
-			mergeMap(
-				() =>
-					new Observable((observer: Observer<TResult>) => {
-						const callback = this.createObserver(observer);
-						return this.publish({ pattern, data }, callback);
-					})
-			)
-		);
+	protected publish(packet: ReadPacket<any>, callback: (packet: WritePacket<any>) => void): () => void {
+		throw new NotImplementedException("ServiceBus Transporter does not support replies!");
 	}
 
 	public emit<

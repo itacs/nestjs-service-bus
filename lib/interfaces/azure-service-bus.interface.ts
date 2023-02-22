@@ -1,10 +1,20 @@
-import { CreateQueueOptions, CreateSubscriptionOptions, CreateTopicOptions, OperationOptionsBase, ServiceBusClientOptions } from '@azure/service-bus';
+import {
+	CreateQueueOptions,
+	CreateSubscriptionOptions,
+	CreateTopicOptions,
+	OperationOptionsBase,
+	ServiceBusClientOptions,
+	ServiceBusReceiverOptions,
+	SubscribeOptions
+} from '@azure/service-bus';
 
 export interface AzureServiceBusOptions {
 	connectionString: string;
+	topic: string;
 	groupId: string;
 	options?: ServiceBusClientOptions;
-	createQueueOptions?: CreateQueueOptions;
+	subscribeOptions?: SubscribeOptions;
+	receiverOptions?: ServiceBusReceiverOptions;
 	createTopicOptions?: CreateTopicOptions;
 	createSubscriptionOptions?: CreateSubscriptionOptions;
 }
